@@ -1,17 +1,35 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "processit"
 dynamic = ["version"]
-description = "Process It"
+readme = "README.md"
+description = "Lightweight progress utilities for sync/async workloads"
+requires-python = ">=3.12"
 authors = [{name = "Vicente Ruiz"}]
 license = {file = "LICENSE"}
 dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Typing :: Typed",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "processit._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+processit = ["py.typed"]
+
+[tool.setuptools]
+include-package-data = true
 
 [project.optional-dependencies]
 dev = [
