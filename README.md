@@ -189,9 +189,13 @@ asyncio.run(main())
 ## Features
 
 ✅ Works with both **async** and **sync** iterables
+
 ✅ Displays **elapsed time**, **rate**, and **ETA** (when total is known)
+
 ✅ Automatically cleans up and prints a **final summary**
+
 ✅ **No dependencies** — pure Python, fully type-hinted
+
 ✅ Easy to use drop-in function: `progress(iterable, ...)`
 
 ---
@@ -202,33 +206,16 @@ asyncio.run(main())
 
 Creates and returns a `Progress` instance.
 
+### `track_as_completed(tasks, total=None, *, desc='Processing', width=30, refresh_interval=0.1, show_summary=True)`
+
+Creates and returns a `Progress` instance.
+
 #### Parameters
 | Name | Type | Description |
 |------|------|-------------|
-| `iterable` | `Iterable[T] | AsyncIterable[T]` | The iterable or async iterable to track. |
-| `total` | `int | None` | Total number of iterations (optional). |
+| `iterable` | `Iterable[T]` | `AsyncIterable[T]` | The iterable or async iterable to track. |
+| `total` | `int` | `None` | Total number of iterations (optional). |
 | `desc` | `str` | A short description shown before the bar. |
 | `width` | `int` | Width of the progress bar (default: 30). |
 | `refresh_interval` | `float` | Time in seconds between updates. |
 | `show_summary` | `bool` | Whether to show a final summary line (default: `True`). |
-
----
-
-## Usage with Regular Iterables
-
-```python
-from processit import progress
-import time
-
-def numbers():
-    for i in range(5):
-        time.sleep(0.3)
-        yield i
-
-async def main():
-    async for n in progress(numbers(), total=5, desc="Sync loop"):
-        await asyncio.sleep(0)
-
-import asyncio
-asyncio.run(main())
-```
