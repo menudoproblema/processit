@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         AsyncIterable,
         AsyncIterator,
         Awaitable,
+        Callable,
         Iterable,
     )
 
@@ -79,6 +80,121 @@ class Progress[T]:
             self.stream.write(msg)
             self.stream.flush()
         self._render(force=True)
+
+    async def amap[R](
+        self,
+        mapper: Callable[[T], Awaitable[R]],
+        *,
+        concurrency: int = 10,
+        preserve_order: bool = False,
+    ) -> AsyncIterator[R]:
+        """Apply an async mapper over items with controlled concurrency.
+
+        This method executes `mapper(item)` concurrently for elements in the
+        wrapped iterable, up to the specified concurrency limit. It integrates
+        with the progress bar, updating progress as tasks complete.
+
+        Parameters
+        ----------
+        mapper : Callable[[T], Awaitable[R]]
+            Asynchronous function applied to each item. Must return an
+            awaitable.
+
+        concurrency : int, optional
+            Maximum number of concurrent tasks (default: 10). Must be >= 1.
+
+        preserve_order : bool, optional
+            Controls result ordering:
+
+            - False (default): yield results as tasks complete (higher
+              throughput).
+            - True: yield results in input order (may wait for slower tasks).
+
+        Yields:
+        ------
+        R
+            Result of `await mapper(item)` for each element.
+
+        Raises:
+        ------
+        ValueError
+            If `concurrency < 1`.
+
+        Notes:
+        -----
+        - Intended for IO-bound workloads (e.g., HTTP calls, async DB queries,
+          async file operations).
+        - With `preserve_order=True`, results are buffered until completion,
+          increasing memory usage for large iterables.
+        - Blocking operations inside `mapper` will block the event loop unless
+          moved to a thread (e.g., via `asyncio.to_thread`).
+        """
+        if concurrency < 1:
+            msg = 'concurrency must be >= 1'
+            raise ValueError(msg)
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def run_one(idx: int, item: T) -> tuple[int, R]:
+            async with sem:
+                res = await mapper(item)
+                return idx, res
+
+        # Start the refresh task if it hasn't been started
+        # yet (same as in __aiter__)
+        started_here = False
+        if self._refresh_task is None:
+            self._stopped = False
+            self._render(force=True)
+            self._refresh_task = asyncio.create_task(
+                self._refresh_periodically(),
+            )
+            started_here = True
+
+        try:
+            tasks: list[asyncio.Task[tuple[int, R]]] = []
+            idx = 0
+
+            async def push(item: T) -> None:
+                nonlocal idx
+                tasks.append(asyncio.create_task(run_one(idx, item)))
+                idx += 1
+
+            # Feed tasks from the underlying iterable (sync or async)
+            if hasattr(self.iterable, '__aiter__'):
+                async for item in cast('AsyncIterable[T]', self.iterable):
+                    await push(item)
+            else:
+                for item in cast('Iterable[T]', self.iterable):
+                    await push(item)
+                    # Yield control to the event loop so the refresh
+                    # task can run
+                    await asyncio.sleep(0)
+
+            if preserve_order:
+                # Wait for all tasks, then sort by index to preserve
+                # input order
+                results = await asyncio.gather(*tasks)
+                results.sort(key=lambda x: x[0])
+                for _, value in results:
+                    self.count += 1
+                    self._render()
+                    yield value
+            else:
+                # Yield results as tasks complete
+                for fut in asyncio.as_completed(tasks):
+                    _, value = await fut
+                    self.count += 1
+                    self._render()
+                    yield value
+
+        finally:
+            if started_here and self._refresh_task is not None:  # pyright: ignore[reportUnnecessaryComparison]
+                self._refresh_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._refresh_task
+                self._refresh_task = None
+            self._print_summary_if_needed()
 
     def _format_elapsed(self, seconds: float) -> str:
         """Return hh:mm:ss, mm:ss or ss.s depending on duration."""
