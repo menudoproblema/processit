@@ -65,6 +65,107 @@ async def test_sync_iterable_basic_summary_only_once():
 
 
 @pytest.mark.asyncio
+async def test_non_tty_respects_refresh_interval():
+    stream = io.StringIO()
+    expected_bar_frames = 2
+
+    def numbers() -> Iterator[int]:
+        for i in range(20):
+            time.sleep(0.005)
+            yield i
+
+    async for _ in progress(
+        numbers(),
+        desc='NonTTY',
+        total=20,
+        stream=stream,
+        refresh_interval=10.0,
+    ):
+        await asyncio.sleep(0)
+
+    out = _strip_ansi(stream.getvalue())
+    assert out.count('NonTTY [') == expected_bar_frames
+    assert 'NonTTY [##############################] 100.00% (20/20)' in out
+    assert out.count('NonTTY: 20 it in ') == 1
+
+
+@pytest.mark.asyncio
+async def test_non_tty_renders_final_complete_frame_before_summary():
+    stream = io.StringIO()
+    data = list(range(3))
+
+    async for _ in progress(
+        data,
+        desc='Final',
+        total=3,
+        stream=stream,
+        refresh_interval=10.0,
+    ):
+        await asyncio.sleep(0)
+
+    lines = [
+        line for line in _strip_ansi(stream.getvalue()).splitlines() if line
+    ]
+    expected_complete = 'Final [##############################] 100.00% (3/3)'
+    assert any(expected_complete in line for line in lines)
+    assert lines[-1].startswith('Final: 3 it in ')
+
+
+@pytest.mark.asyncio
+async def test_non_tty_async_iterable_does_not_duplicate_periodic_frames():
+    stream = io.StringIO()
+    expected_lines = 5
+
+    async def agen() -> AsyncIterator[int]:
+        for i in range(3):
+            await asyncio.sleep(0.01)
+            yield i
+
+    async for _ in progress(
+        agen(),
+        desc='NoDupes',
+        total=3,
+        stream=stream,
+        refresh_interval=0.005,
+    ):
+        await asyncio.sleep(0)
+
+    lines = [
+        line for line in _strip_ansi(stream.getvalue()).splitlines() if line
+    ]
+    assert len(lines) == expected_lines
+    assert sum('(0/3)' in line for line in lines) == 1
+    assert sum('(1/3)' in line for line in lines) == 1
+    assert sum('(2/3)' in line for line in lines) == 1
+    assert sum('(3/3)' in line for line in lines) == 1
+    assert lines[-1].startswith('NoDupes: 3 it in ')
+
+
+@pytest.mark.asyncio
+async def test_elapsed_starts_on_first_use_not_object_creation():
+    stream = io.StringIO()
+    p = progress(
+        [1],
+        total=1,
+        desc='Delay',
+        stream=stream,
+        refresh_interval=10.0,
+    )
+
+    await asyncio.sleep(0.2)
+
+    async for _ in p:
+        await asyncio.sleep(0)
+
+    out = _strip_ansi(stream.getvalue())
+    expected_initial = (
+        'Delay [..............................]   0.00% (0/1) 0.00 it/s 00.0s'
+    )
+    assert expected_initial in out
+    assert 'Delay: 1 it in 00.0s' in out
+
+
+@pytest.mark.asyncio
 async def test_sync_iterable_infers_total_from_len():
     stream = io.StringIO()
     data = list(range(4))  # tiene __len__
@@ -72,9 +173,9 @@ async def test_sync_iterable_infers_total_from_len():
         data,
         desc='Len inf',
         stream=stream,
-        refresh_interval=1.0,
+        refresh_interval=0.001,
     ):
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     out = stream.getvalue()
     # En algún render debe aparecer (4/4)
     assert '(4/4)' in out
@@ -312,18 +413,18 @@ async def test_eta_only_when_total_known():
         total=3,
         desc='HasTotal',
         stream=stream1,
-        refresh_interval=1.0,
+        refresh_interval=0.001,
     ):
-        pass
+        await asyncio.sleep(0.01)
 
     # Sin total -> preferimos que no aparezca "ETA" en la salida
     async for _ in progress(
         agen(),
         desc='NoTotal',
         stream=stream2,
-        refresh_interval=1.0,
+        refresh_interval=0.001,
     ):
-        pass
+        await asyncio.sleep(0.01)
 
     out1 = stream1.getvalue()
     out2 = stream2.getvalue()

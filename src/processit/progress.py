@@ -23,9 +23,11 @@ class Progress[T]:
         '_is_tty',
         '_last_line_len',
         '_last_refresh',
+        '_last_render_count',
         '_next_render_at',
         '_prefix',
         '_refresh_task',
+        '_started',
         '_stopped',
         '_summary_printed',
         'count',
@@ -65,9 +67,25 @@ class Progress[T]:
         self._refresh_task: asyncio.Task[None] | None = None
         self._summary_printed = False
         self._last_line_len = 0
+        self._last_render_count = 0
+        self._started = False
         self._stopped = False
         self._is_tty = bool(getattr(self.stream, 'isatty', lambda: False)())
         self._prefix = f'{self.desc} '
+
+    def _start_rendering(self) -> None:
+        self._started = True
+        self._stopped = False
+        self.start_time = time.perf_counter()
+        self._last_refresh = 0.0
+        self._next_render_at = 0.0
+        self._last_line_len = 0
+        self._last_render_count = -1
+        self._render(force=True)
+        if self._is_tty:
+            self._refresh_task = asyncio.create_task(
+                self._refresh_periodically(),
+            )
 
     def write(self, msg: str = '') -> None:
         """Print a message below the bar and re-render it (TTY-safe)."""
@@ -143,12 +161,8 @@ class Progress[T]:
         # Start the refresh task if it hasn't been started
         # yet (same as in __aiter__)
         started_here = False
-        if self._refresh_task is None:
-            self._stopped = False
-            self._render(force=True)
-            self._refresh_task = asyncio.create_task(
-                self._refresh_periodically(),
-            )
+        if not self._started:
+            self._start_rendering()
             started_here = True
 
         try:
@@ -195,6 +209,7 @@ class Progress[T]:
                     await self._refresh_task
                 self._refresh_task = None
             self._print_summary_if_needed()
+            self._started = False
 
     def _format_elapsed(self, seconds: float) -> str:
         """Return hh:mm:ss, mm:ss or ss.s depending on duration."""
@@ -217,7 +232,7 @@ class Progress[T]:
             # tests/logs
             self.stream.write(text + '\n')
             self.stream.flush()
-            self._last_line_len = 0
+            self._last_line_len = len(text)
 
     def _clear_line(self) -> None:
         if self._is_tty:
@@ -268,11 +283,18 @@ class Progress[T]:
             )
 
         self._write_line(line)
+        self._last_render_count = self.count
         self._last_refresh = now
         self._next_render_at = now + self.refresh_interval
 
     def _print_summary_if_needed(self) -> None:
         if self.show_summary and not self._summary_printed:
+            if (
+                self.total is not None
+                and self.count == self.total
+                and self._last_render_count != self.count
+            ):
+                self._render(force=True)
             self._stopped = True
             self._clear_line()
 
@@ -295,9 +317,8 @@ class Progress[T]:
             self._render()
 
     async def __aenter__(self) -> Progress[T]:
-        self._stopped = False
-        self._render(force=True)  # feedback inmediato
-        self._refresh_task = asyncio.create_task(self._refresh_periodically())
+        if not self._started:
+            self._start_rendering()  # feedback inmediato
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -307,18 +328,14 @@ class Progress[T]:
                 await self._refresh_task
             self._refresh_task = None
         self._print_summary_if_needed()
+        self._started = False
 
     async def __aiter__(self) -> AsyncIterator[T]:
         started_here = False
 
-        if self._refresh_task is None:
-            self._stopped = False
-            self._render(
-                force=True,
-            )  # feedback inmediato fuera de context manager
-            self._refresh_task = asyncio.create_task(
-                self._refresh_periodically(),
-            )
+        if not self._started:
+            # feedback inmediato fuera de context manager
+            self._start_rendering()
             started_here = True
 
         try:
@@ -341,6 +358,7 @@ class Progress[T]:
                     await self._refresh_task
                 self._refresh_task = None
             self._print_summary_if_needed()
+            self._started = False
 
 
 def progress[T](  # noqa: PLR0913

@@ -160,6 +160,21 @@ Need concurrency limit `Semaphore` + `track_as_completed(...)`
 
 ---
 
+### 3. TTY vs non-TTY output
+
+When the output stream is a real TTY, `processit` redraws the same line.
+
+When the output stream is not a TTY (for example CI logs, redirected output,
+or `StringIO` in tests), `processit` emits line-based snapshots instead:
+
+- It respects `refresh_interval` without periodic duplicate frames
+- It prints a final `100%` snapshot before the summary when `total` is known
+
+Timing starts when iteration actually begins, not when the `Progress`
+instance is created.
+
+---
+
 ## More Examples
 
 ### Asynchronous iteration over a data source
