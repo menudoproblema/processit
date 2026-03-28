@@ -58,8 +58,9 @@ def numbers():
 
 async def main():
     async with progress(numbers(), total=10, desc='Numbers') as p:
+        log = p.log_stream()
         async for n in p:
-            p.write(f'value: {n}')
+            print(f'value: {n}', file=log)
             await asyncio.sleep(0.5)
 
 asyncio.run(main())
@@ -169,6 +170,8 @@ or `StringIO` in tests), `processit` emits line-based snapshots instead:
 
 - It respects `refresh_interval` without periodic duplicate frames
 - It prints a final `100%` snapshot before the summary when `total` is known
+- Messages written with `p.write(...)` or `file=p.log_stream()` stay above the
+  live bar; the bar is re-rendered as the last line in TTY mode
 
 Timing starts when iteration actually begins, not when the `Progress`
 instance is created.
@@ -241,6 +244,17 @@ Name Type Description
 `width` `int` Width of the progress bar
 `refresh_interval` `float` Time between updates
 `show_summary` `bool` Whether to print final summary
+
+---
+
+### Progress helpers inside `async with progress(...) as p`
+
+- `p.write("message")`: prints a message above the live bar and re-renders it
+- `p.log_stream()`: returns a file-like stream for `print(..., file=...)` or
+  `logging.StreamHandler`
+
+If a command mixes progress output with logs, prefer one of those two
+interfaces instead of calling `print(...)` directly on stdout/stderr.
 
 ---
 

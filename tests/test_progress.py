@@ -34,6 +34,49 @@ def _last_nonempty_line(buf: str) -> str:
     return ''
 
 
+class _TTYStringIO(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def _render_tty_screen(buf: str) -> list[str]:
+    lines: list[str] = []
+    current: list[str] = []
+    cursor = 0
+    idx = 0
+
+    while idx < len(buf):
+        if buf.startswith('\x1b[2K', idx):
+            current = []
+            cursor = 0
+            idx += 4
+            continue
+
+        char = buf[idx]
+        idx += 1
+
+        if char == '\r':
+            cursor = 0
+            continue
+
+        if char == '\n':
+            lines.append(''.join(current))
+            current = []
+            cursor = 0
+            continue
+
+        if cursor == len(current):
+            current.append(char)
+        else:
+            current[cursor] = char
+        cursor += 1
+
+    if current:
+        lines.append(''.join(current))
+
+    return [line for line in lines if line.strip()]
+
+
 # -----------------------------
 # Synchronous iterable cases
 # -----------------------------
@@ -263,6 +306,60 @@ async def test_async_with_and_write_no_extra_bar_at_end():
     assert last.startswith('With: 5 it in ')
     # Y que no haya texto de barra después del resumen
     assert 'With [' not in last
+
+
+@pytest.mark.asyncio
+async def test_log_stream_flushes_partial_output_before_summary_non_tty():
+    stream = io.StringIO()
+
+    async with progress(
+        [1, 2],
+        total=2,
+        desc='Stream',
+        stream=stream,
+        refresh_interval=10.0,
+    ) as p:
+        log = p.log_stream()
+        print('alpha', file=log)
+        log.write('beta')
+
+        async for _ in p:
+            await asyncio.sleep(0)
+
+    lines = [
+        line for line in _strip_ansi(stream.getvalue()).splitlines() if line
+    ]
+    assert 'alpha' in lines
+    assert 'beta' in lines
+    assert lines[-1].startswith('Stream: 2 it in ')
+    assert lines.index('alpha') < lines.index('beta') < len(lines) - 1
+
+
+@pytest.mark.asyncio
+async def test_log_stream_keeps_messages_above_bar_in_tty():
+    stream = _TTYStringIO()
+
+    async with progress(
+        [1, 2],
+        total=2,
+        desc='TTY',
+        stream=stream,
+        refresh_interval=10.0,
+    ) as p:
+        log = p.log_stream()
+        print('alpha', file=log)
+        log.write('beta')
+
+        async for _ in p:
+            await asyncio.sleep(0)
+
+    raw = stream.getvalue()
+    screen = _render_tty_screen(raw)
+
+    assert 'alpha\n\r\x1b[2KTTY [' in raw
+    assert 'beta\n\r\x1b[2KTTY [' in raw
+    assert screen[:-1] == ['alpha', 'beta']
+    assert screen[-1].startswith('TTY: 2 it in ')
 
 
 # -----------------------------

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import sys
 import time
 
@@ -18,12 +19,64 @@ if TYPE_CHECKING:
     )
 
 
+class _ProgressLogStream(io.TextIOBase):
+    __slots__ = ('_buffer', '_progress')
+
+    def __init__(self, progress: Progress[object]) -> None:
+        self._progress = progress
+        self._buffer = ''
+
+    @property
+    def encoding(self) -> str | None:
+        return getattr(self._progress.stream, 'encoding', None)
+
+    def isatty(self) -> bool:
+        return self._progress._is_tty
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, msg: str) -> int:
+        if not isinstance(msg, str):
+            msg = str(msg)
+
+        if not msg:
+            return 0
+
+        self._buffer += msg
+        self._flush_complete_lines()
+        return len(msg)
+
+    def flush(self) -> None:
+        self.flush_pending()
+
+    def close(self) -> None:
+        self.flush()
+
+    def flush_pending(self) -> None:
+        if not self._buffer:
+            return
+
+        pending = self._buffer.removesuffix('\r')
+        self._buffer = ''
+        self._progress._write_message(pending, allow_blank=True)
+
+    def _flush_complete_lines(self) -> None:
+        while '\n' in self._buffer:
+            line, self._buffer = self._buffer.split('\n', 1)
+            self._progress._write_message(
+                line.removesuffix('\r'),
+                allow_blank=True,
+            )
+
+
 class Progress[T]:
     __slots__ = (
         '_is_tty',
         '_last_line_len',
         '_last_refresh',
         '_last_render_count',
+        '_log_stream',
         '_next_render_at',
         '_prefix',
         '_refresh_task',
@@ -71,6 +124,7 @@ class Progress[T]:
         self._started = False
         self._stopped = False
         self._is_tty = bool(getattr(self.stream, 'isatty', lambda: False)())
+        self._log_stream: _ProgressLogStream | None = None
         self._prefix = f'{self.desc} '
 
     def _start_rendering(self) -> None:
@@ -88,16 +142,35 @@ class Progress[T]:
             )
 
     def write(self, msg: str = '') -> None:
-        """Print a message below the bar and re-render it (TTY-safe)."""
+        """Print a message above the live bar and re-render it."""
+        self._write_message(msg)
+
+    def log_stream(self) -> TextIO:
+        """Return a file-like stream that logs above the live bar."""
+        if self._log_stream is None:
+            progress = cast('Progress[object]', self)
+            self._log_stream = _ProgressLogStream(progress)
+        return cast('TextIO', self._log_stream)
+
+    def _write_message(
+        self,
+        msg: str = '',
+        *,
+        allow_blank: bool = False,
+    ) -> None:
         if self._stopped:
             return
         self._clear_line()
-        if msg:
+        if msg or allow_blank:
             if not msg.endswith('\n'):
                 msg += '\n'
             self.stream.write(msg)
             self.stream.flush()
         self._render(force=True)
+
+    def _flush_log_stream(self) -> None:
+        if self._log_stream is not None:
+            self._log_stream.flush_pending()
 
     async def amap[R](
         self,
@@ -288,6 +361,7 @@ class Progress[T]:
         self._next_render_at = now + self.refresh_interval
 
     def _print_summary_if_needed(self) -> None:
+        self._flush_log_stream()
         if self.show_summary and not self._summary_printed:
             if (
                 self.total is not None
