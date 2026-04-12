@@ -176,6 +176,16 @@ or `StringIO` in tests), `processit` emits line-based snapshots instead:
 Timing starts when iteration actually begins, not when the `Progress`
 instance is created.
 
+If you want the live bar to disappear after completion, use
+`transient=True`. In TTY streams the active line is cleared on exit and
+the final summary is suppressed. In non-TTY streams previously emitted
+snapshots cannot be removed, so `transient=True` only suppresses the
+summary line.
+
+If you set `show_summary=False` without `transient=True`, the last
+rendered frame remains visible. Use `transient=True` when you want the
+TTY line cleared on exit.
+
 ---
 
 ## More Examples
@@ -222,7 +232,8 @@ asyncio.run(main())
 - Works with both **async** and **sync** iterables
 - Displays **elapsed time**, **rate**, and **ETA** (when total is
   known)
-- Automatically cleans up and prints a **final summary**
+- Can keep the final frame, print a summary, or clear the bar with
+  `transient=True`
 - No dependencies --- pure Python, fully type-hinted
 - Easy to use drop-in function: `progress(iterable, ...)`
 
@@ -230,7 +241,7 @@ asyncio.run(main())
 
 ## API
 
-### progress(iterable, total=None, \*, desc='Processing', width=30, refresh_interval=0.1, show_summary=True)
+### progress(iterable, total=None, \*, desc='Processing', width=30, refresh_interval=0.1, show_summary=True, transient=False)
 
 Creates and returns a `Progress` instance.
 
@@ -244,6 +255,7 @@ Name Type Description
 `width` `int` Width of the progress bar
 `refresh_interval` `float` Time between updates
 `show_summary` `bool` Whether to print final summary
+`transient` `bool` Whether to clear the live TTY bar on exit and suppress the summary
 
 ---
 
@@ -258,7 +270,7 @@ interfaces instead of calling `print(...)` directly on stdout/stderr.
 
 ---
 
-### track_as_completed(tasks, total=None, \*, desc='Processing', width=30, refresh_interval=0.1, show_summary=True)
+### track_as_completed(tasks, total=None, \*, desc='Processing', width=30, refresh_interval=0.1, show_summary=True, transient=False, cancel_pending=False)
 
 Tracks a collection of awaitables or tasks as they complete.
 
@@ -272,6 +284,8 @@ Name Type Description
 `width` `int` Width of the progress bar
 `refresh_interval` `float` Time between updates
 `show_summary` `bool` Whether to print final summary
+`transient` `bool` Whether to clear the live TTY bar on exit and suppress the summary
+`cancel_pending` `bool` Whether to cancel unfinished tasks if iteration stops early
 
 ---
 
