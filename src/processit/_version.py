@@ -1,2 +1,2 @@
-version_info: tuple[int | str, ...] = (0, 2, 2)
+version_info: tuple[int | str, ...] = (0, 3, 0)
 __version__ = '.'.join(map(str, version_info))
