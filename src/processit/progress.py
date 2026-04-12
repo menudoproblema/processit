@@ -91,6 +91,7 @@ class Progress[T]:
         'start_time',
         'stream',
         'total',
+        'transient',
         'width',
     )
 
@@ -104,6 +105,7 @@ class Progress[T]:
         stream: TextIO | None = None,
         refresh_interval: float = 0.1,
         show_summary: bool = True,
+        transient: bool = False,
     ) -> None:
         self.iterable = iterable
         self.total = total
@@ -112,6 +114,7 @@ class Progress[T]:
         self.stream = stream or sys.stderr
         self.refresh_interval = refresh_interval
         self.show_summary = show_summary
+        self.transient = transient
 
         self.count = 0
         self.start_time = time.perf_counter()
@@ -171,6 +174,15 @@ class Progress[T]:
     def _flush_log_stream(self) -> None:
         if self._log_stream is not None:
             self._log_stream.flush_pending()
+
+    async def _stop_refresh_task(self) -> None:
+        if self._refresh_task is None:
+            return
+
+        self._refresh_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._refresh_task
+        self._refresh_task = None
 
     async def amap[R](
         self,
@@ -276,11 +288,8 @@ class Progress[T]:
                     yield value
 
         finally:
-            if started_here and self._refresh_task is not None:  # pyright: ignore[reportUnnecessaryComparison]
-                self._refresh_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._refresh_task
-                self._refresh_task = None
+            if started_here:
+                await self._stop_refresh_task()
             self._print_summary_if_needed()
             self._started = False
 
@@ -316,6 +325,14 @@ class Progress[T]:
             # non-TTY: renders are on separate lines; nothing to clear
             pass
 
+    def _should_render_final_state(self) -> bool:
+        if self._last_render_count == self.count:
+            return False
+
+        # En TTY transient la linea activa se elimina al salir, asi que no
+        # merece la pena forzar un ultimo render.
+        return not (self.transient and self._is_tty)
+
     def _should_render(self, now: float) -> bool:
         # Permite render al inicio (_next_render_at=0) o si ha
         # pasado refresh_interval
@@ -339,8 +356,12 @@ class Progress[T]:
             eta = remaining / rate
             eta_str = f' ETA {self._format_elapsed(eta)}'
 
-        if self.total:
-            frac = min(self.count / self.total, 1.0)
+        if self.total is not None:
+            frac = (
+                1.0
+                if self.total == 0
+                else min(self.count / self.total, 1.0)
+            )
             filled = int(self.width * frac)
             bar = f'[{"#" * filled}{"." * (self.width - filled)}]'
             percent = f'{frac * 100:6.2f}%'
@@ -362,14 +383,17 @@ class Progress[T]:
 
     def _print_summary_if_needed(self) -> None:
         self._flush_log_stream()
-        if self.show_summary and not self._summary_printed:
-            if (
-                self.total is not None
-                and self.count == self.total
-                and self._last_render_count != self.count
-            ):
-                self._render(force=True)
+        if self._should_render_final_state():
+            self._render(force=True)
+
+        if self.transient:
             self._stopped = True
+            self._clear_line()
+            self._summary_printed = True
+            return
+
+        self._stopped = True
+        if self.show_summary and not self._summary_printed:
             self._clear_line()
 
             elapsed = time.perf_counter() - self.start_time
@@ -396,11 +420,7 @@ class Progress[T]:
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        if self._refresh_task is not None:
-            self._refresh_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._refresh_task
-            self._refresh_task = None
+        await self._stop_refresh_task()
         self._print_summary_if_needed()
         self._started = False
 
@@ -426,11 +446,8 @@ class Progress[T]:
                     # cede el loop para no bloquear el refresco
                     await asyncio.sleep(0)
         finally:
-            if started_here and self._refresh_task is not None:  # type: ignore
-                self._refresh_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._refresh_task
-                self._refresh_task = None
+            if started_here:
+                await self._stop_refresh_task()
             self._print_summary_if_needed()
             self._started = False
 
@@ -443,6 +460,7 @@ def progress[T](  # noqa: PLR0913
     width: int = 30,
     refresh_interval: float = 0.1,
     show_summary: bool = True,
+    transient: bool = False,
     stream: TextIO | None = None,
 ) -> Progress[T]:
     """Wrap an iterable or async iterable with a progress bar.
@@ -464,6 +482,11 @@ def progress[T](  # noqa: PLR0913
     show_summary: bool, optional
         Whether to print a final summary line showing total iterations,
         total time, and iteration rate (default: True).
+    transient: bool, optional
+        Whether to remove the live bar when the iteration finishes. When
+        enabled, it also suppresses the final summary line. This only
+        clears the terminal in TTY streams; non-TTY streams keep the
+        already emitted snapshots (default: False).
     stream: TextIO | None, optional
         Output stream to render the bar (default: sys.stderr).
 
@@ -486,6 +509,7 @@ def progress[T](  # noqa: PLR0913
         width=width,
         refresh_interval=refresh_interval,
         show_summary=show_summary,
+        transient=transient,
         stream=stream,
     )
 
@@ -498,6 +522,8 @@ def track_as_completed[T](  # noqa: PLR0913
     width: int = 30,
     refresh_interval: float = 0.1,
     show_summary: bool = True,
+    transient: bool = False,
+    cancel_pending: bool = False,
     stream: TextIO | None = None,
 ) -> Progress[asyncio.Future[T]]:
     """Iterate results as tasks complete, with a progress bar.
@@ -517,6 +543,12 @@ def track_as_completed[T](  # noqa: PLR0913
         Seconds between refreshes.
     show_summary: bool
         Whether to print a final summary line.
+    transient: bool
+        Whether to remove the live bar when all tasks complete. When
+        enabled, it also suppresses the final summary line.
+    cancel_pending: bool
+        Whether to cancel unfinished tasks if the consumer stops
+        iterating before all results have been yielded.
     stream: TextIO | None, optional
         Output stream to render the bar (default: sys.stderr).
 
@@ -531,6 +563,9 @@ def track_as_completed[T](  # noqa: PLR0913
     `asyncio.as_completed(...)` directly to `Progress`, since its `next()` can
     block the event loop. Instead, we drive completion asynchronously using
     `asyncio.wait(FIRST_COMPLETED)`.
+
+    Pending tasks are left running by default if the consumer stops early.
+    Set `cancel_pending=True` to cancel them during generator cleanup.
     """
     # Infer total if possible
     if total is None and hasattr(tasks, '__len__'):
@@ -553,9 +588,10 @@ def track_as_completed[T](  # noqa: PLR0913
                 for fut in done:
                     yield fut
         finally:
-            # No cancelamos 'pending' por defecto (el consumidor decide su
-            # ciclo de vida).
-            pass
+            if cancel_pending and pending:
+                for fut in pending:
+                    fut.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
     return progress(
         _as_completed_async(),
@@ -564,5 +600,6 @@ def track_as_completed[T](  # noqa: PLR0913
         width=width,
         refresh_interval=refresh_interval,
         show_summary=show_summary,
+        transient=transient,
         stream=stream,
     )

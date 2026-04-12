@@ -1,9 +1,7 @@
-# tests/test_processit.py
 from __future__ import annotations
 
 import asyncio
 import io
-import time
 
 from typing import TYPE_CHECKING
 
@@ -87,9 +85,7 @@ async def test_sync_iterable_basic_summary_only_once():
     stream = io.StringIO()
 
     def numbers() -> Iterator[int]:
-        for i in range(5):
-            time.sleep(0.01)
-            yield i
+        yield from range(5)
 
     # Consumo como async for (la clase cede el loop con await asyncio.sleep(0))
     async for _ in progress(
@@ -113,9 +109,7 @@ async def test_non_tty_respects_refresh_interval():
     expected_bar_frames = 2
 
     def numbers() -> Iterator[int]:
-        for i in range(20):
-            time.sleep(0.005)
-            yield i
+        yield from range(20)
 
     async for _ in progress(
         numbers(),
@@ -152,6 +146,51 @@ async def test_non_tty_renders_final_complete_frame_before_summary():
     expected_complete = 'Final [##############################] 100.00% (3/3)'
     assert any(expected_complete in line for line in lines)
     assert lines[-1].startswith('Final: 3 it in ')
+
+
+@pytest.mark.asyncio
+async def test_tty_transient_clears_bar_without_summary():
+    stream = _TTYStringIO()
+
+    async for _ in progress(
+        [1, 2, 3],
+        desc='Transient',
+        total=3,
+        stream=stream,
+        refresh_interval=10.0,
+        transient=True,
+    ):
+        await asyncio.sleep(0)
+
+    out = stream.getvalue()
+
+    assert _render_tty_screen(out) == []
+    assert 'Transient: 3 it in ' not in out
+
+
+@pytest.mark.asyncio
+async def test_non_tty_transient_suppresses_summary_but_keeps_snapshots():
+    stream = io.StringIO()
+
+    async for _ in progress(
+        [1, 2, 3],
+        desc='Transient',
+        total=3,
+        stream=stream,
+        refresh_interval=10.0,
+        transient=True,
+    ):
+        await asyncio.sleep(0)
+
+    lines = [
+        line for line in _strip_ansi(stream.getvalue()).splitlines() if line
+    ]
+
+    assert any(
+        'Transient [##############################] 100.00% (3/3)' in line
+        for line in lines
+    )
+    assert all('Transient: 3 it in ' not in line for line in lines)
 
 
 @pytest.mark.asyncio
@@ -285,9 +324,7 @@ async def test_async_with_and_write_no_extra_bar_at_end():
     stream = io.StringIO()
 
     def numbers() -> Iterator[int]:
-        for i in range(5):
-            time.sleep(0.01)
-            yield i
+        yield from range(5)
 
     async with progress(
         numbers(),
@@ -412,6 +449,64 @@ async def test_track_as_completed_equal_durations_still_counts():
     assert 'Equal: 8 it in ' in out
 
 
+@pytest.mark.asyncio
+async def test_track_as_completed_accepts_transient():
+    stream = _TTYStringIO()
+
+    async def work(n: int) -> int:
+        await asyncio.sleep(0.001)
+        return n
+
+    tasks = [work(1), work(2)]
+    async for fut in track_as_completed(
+        tasks,
+        total=2,
+        desc='Parallel',
+        stream=stream,
+        refresh_interval=10.0,
+        transient=True,
+    ):
+        _ = await fut
+
+    out = stream.getvalue()
+    assert _render_tty_screen(out) == []
+    assert 'Parallel: 2 it in ' not in out
+
+
+@pytest.mark.asyncio
+async def test_track_as_completed_can_cancel_pending_tasks_on_early_exit():
+    release = asyncio.Event()
+
+    async def fast() -> int:
+        await asyncio.sleep(0)
+        return 1
+
+    async def slow() -> int:
+        try:
+            await release.wait()
+            return 2
+        finally:
+            release.set()
+
+    slow_one = asyncio.create_task(slow())
+    slow_two = asyncio.create_task(slow())
+    tasks = [asyncio.create_task(fast()), slow_one, slow_two]
+
+    async for fut in track_as_completed(
+        tasks,
+        total=3,
+        cancel_pending=True,
+        refresh_interval=10.0,
+    ):
+        await fut
+        break
+
+    await asyncio.gather(slow_one, slow_two, return_exceptions=True)
+
+    assert slow_one.cancelled()
+    assert slow_two.cancelled()
+
+
 # -----------------------------
 # show_summary flag
 # -----------------------------
@@ -421,17 +516,43 @@ async def test_track_as_completed_equal_durations_still_counts():
 async def test_show_summary_false():
     stream = io.StringIO()
     data = [1, 2, 3]
-    async for _ in progress(
+    p = progress(
         data,
         desc='NoSum',
+        total=3,
         show_summary=False,
         stream=stream,
-        refresh_interval=1.0,
-    ):
+        refresh_interval=10.0,
+    )
+    async for _ in p:
         await asyncio.sleep(0)
+
     out = _strip_ansi(stream.getvalue())
+    assert 'NoSum [##############################] 100.00% (3/3)' in out
     # No debe haber resumen
     assert 'NoSum: 3 it in ' not in out
+
+    before_write = stream.getvalue()
+    p.write('after')
+    assert stream.getvalue() == before_write
+
+
+@pytest.mark.asyncio
+async def test_total_zero_renders_as_completed_bar():
+    stream = io.StringIO()
+
+    async for _ in progress(
+        [],
+        total=0,
+        desc='Empty',
+        stream=stream,
+        refresh_interval=10.0,
+    ):
+        await asyncio.sleep(0)
+
+    out = _strip_ansi(stream.getvalue())
+    assert 'Empty [##############################] 100.00% (0/0)' in out
+    assert 'Empty: 0 it in ' in out
 
 
 # -----------------------------
