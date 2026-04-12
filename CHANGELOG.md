@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format follows Keep a Changelog, and this project adheres to
 Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Added a GitHub Actions CI workflow to run Ruff, the progress test suite,
+  and package build validation on pushes and pull requests.
+
 ## [0.3.0] - 2026-04-12
 
 ### Added
