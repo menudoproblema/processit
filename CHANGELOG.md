@@ -12,6 +12,18 @@ Semantic Versioning.
 - Added a GitHub Actions CI workflow to run Ruff, the progress test suite,
   and package build validation on pushes and pull requests.
 
+### Fixed
+
+- Kept live TTY renders within the available terminal width by shrinking the
+  bar and clipping the description when needed, avoiding wrapped fragments
+  after resizes or in narrow terminals.
+
+### Changed
+
+- Documented the narrow-terminal TTY behavior in the README.
+- Expanded regression coverage for narrow TTY rendering so frames stay within
+  the available columns while preserving progress metrics.
+
 ## [0.3.0] - 2026-04-12
 
 ### Added

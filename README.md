@@ -164,6 +164,9 @@ Need concurrency limit `Semaphore` + `track_as_completed(...)`
 ### 3. TTY vs non-TTY output
 
 When the output stream is a real TTY, `processit` redraws the same line.
+If the terminal becomes too narrow, it trims the description and shrinks
+the bar so the render stays within the available columns and does not
+leave wrapped fragments behind after a resize.
 
 When the output stream is not a TTY (for example CI logs, redirected output,
 or `StringIO` in tests), `processit` emits line-based snapshots instead:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,25 @@ class _TTYStringIO(io.StringIO):
     def isatty(self) -> bool:
         return True
 
+
+class _SizedTTYStringIO(_TTYStringIO):
+    def __init__(self, columns: int) -> None:
+        super().__init__()
+        self.columns = columns
+
+    def get_terminal_size(self):
+        return os.terminal_size((self.columns, 24))
+
+
+def _tty_frames(buf: str) -> list[str]:
+    frames: list[str] = []
+    for chunk in buf.split('\r\x1b[2K')[1:]:
+        if not chunk:
+            continue
+        frame = chunk.split('\r', 1)[0].split('\n', 1)[0]
+        if frame:
+            frames.append(frame)
+    return frames
 
 def _render_tty_screen(buf: str) -> list[str]:
     lines: list[str] = []
@@ -166,6 +186,49 @@ async def test_tty_transient_clears_bar_without_summary():
 
     assert _render_tty_screen(out) == []
     assert 'Transient: 3 it in ' not in out
+
+
+@pytest.mark.asyncio
+async def test_tty_keeps_each_frame_within_terminal_width():
+    columns = 50
+    stream = _SizedTTYStringIO(columns=columns)
+
+    async for _ in progress(
+        range(4),
+        desc='Migrando dispatches legacy',
+        total=4,
+        stream=stream,
+        refresh_interval=10.0,
+    ):
+        await asyncio.sleep(0)
+
+    frames = [
+        frame for frame in _tty_frames(stream.getvalue()) if '[' in frame
+    ]
+    assert frames
+    assert all(len(frame) <= columns - 1 for frame in frames)
+
+
+@pytest.mark.asyncio
+async def test_tty_narrow_width_preserves_progress_metrics():
+    columns = 32
+    stream = _SizedTTYStringIO(columns=columns)
+
+    async for _ in progress(
+        range(3),
+        desc='Migrando dispatches legacy',
+        total=3,
+        stream=stream,
+        refresh_interval=10.0,
+    ):
+        await asyncio.sleep(0)
+
+    frames = [
+        frame for frame in _tty_frames(stream.getvalue()) if '[' in frame
+    ]
+    assert frames
+    assert all(len(frame) <= columns - 1 for frame in frames)
+    assert any('3/3' in frame for frame in frames)
 
 
 @pytest.mark.asyncio

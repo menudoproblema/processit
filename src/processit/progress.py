@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import os
+import shutil
 import sys
 import time
 
@@ -303,6 +305,167 @@ class Progress[T]:
         hours, minutes = divmod(minutes, 60)
         return f'{hours:02d}:{minutes:02d}:{secs:02d}'
 
+    def _clip_text(self, text: str, max_len: int) -> str:
+        if max_len <= 0:
+            return ''
+        if len(text) <= max_len:
+            return text
+        if max_len <= 3:  # noqa: PLR2004
+            return '.' * max_len
+        return text[: max_len - 3] + '...'
+
+    def _terminal_columns(self) -> int | None:
+        if not self._is_tty:
+            return None
+
+        get_terminal_size = getattr(self.stream, 'get_terminal_size', None)
+        if callable(get_terminal_size):
+            with contextlib.suppress(OSError, ValueError):
+                size = get_terminal_size()
+                columns = getattr(size, 'columns', 0)
+                if columns > 0:
+                    return columns
+
+        fileno = getattr(self.stream, 'fileno', None)
+        if callable(fileno):
+            with contextlib.suppress(
+                OSError,
+                ValueError,
+                io.UnsupportedOperation,
+            ):
+                columns = os.get_terminal_size(fileno()).columns
+                if columns > 0:
+                    return columns
+
+        with contextlib.suppress(OSError, ValueError):
+            columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+            if columns > 0:
+                return columns
+
+        return None
+
+    def _tty_budget(self) -> int | None:
+        columns = self._terminal_columns()
+        if columns is None:
+            return None
+        # Evita escribir en la ultima columna para no disparar autowrap
+        # en terminales estrechas.
+        return max(columns - 1, 1)
+
+    def _render_bar(self, frac: float, width: int) -> str:
+        filled = int(width * frac)
+        return f'[{"#" * filled}{"." * (width - filled)}]'
+
+    def _fit_render_line(
+        self,
+        *,
+        desc: str,
+        tail_parts: list[str],
+        budget: int,
+        frac: float | None = None,
+    ) -> str | None:
+        desc_text = desc
+        bar_width = self.width if frac is not None else 0
+
+        while True:
+            parts = [desc_text] if desc_text else []
+            if frac is not None:
+                parts.append(self._render_bar(frac, bar_width))
+            parts.extend(part for part in tail_parts if part)
+            line = ' '.join(parts)
+
+            if len(line) <= budget:
+                return line
+
+            overflow = len(line) - budget
+            if frac is not None and bar_width > 1:
+                bar_width -= min(overflow, bar_width - 1)
+                continue
+
+            if desc_text:
+                max_desc_len = max(len(desc_text) - overflow, 0)
+                clipped = (
+                    ''
+                    if max_desc_len < 4  # noqa: PLR2004
+                    else self._clip_text(desc_text, max_desc_len)
+                )
+                if clipped != desc_text:
+                    desc_text = clipped
+                    continue
+
+            return None
+
+    def _build_known_total_line(
+        self,
+        *,
+        frac: float,
+        percent: str,
+        rate: float,
+        elapsed_str: str,
+        eta_str: str,
+    ) -> str:
+        budget = self._tty_budget()
+        count_token = f'({self.count}/{self.total})'
+        rate_token = f'{rate:.2f} it/s'
+        eta_token = eta_str.removeprefix(' ')
+        variants = [
+            [percent, count_token, rate_token, elapsed_str, eta_token],
+            [percent, count_token, rate_token, elapsed_str],
+            [percent, count_token, elapsed_str],
+            [percent, count_token],
+            [f'{self.count}/{self.total}', elapsed_str],
+            [f'{self.count}/{self.total}'],
+        ]
+
+        if budget is None:
+            return self._fit_render_line(
+                desc=self.desc,
+                tail_parts=variants[0],
+                budget=10_000,
+                frac=frac,
+            ) or ''
+
+        bar_variants = 4
+        for index, tail_parts in enumerate(variants):
+            line = self._fit_render_line(
+                desc=self.desc,
+                tail_parts=tail_parts,
+                budget=budget,
+                frac=frac if index < bar_variants else None,
+            )
+            if line is not None:
+                return line
+
+        fallback = f'{self.desc} {self.count}/{self.total}'
+        return self._clip_text(fallback, budget)
+
+    def _build_unknown_total_line(
+        self,
+        *,
+        rate: float,
+        elapsed_str: str,
+    ) -> str:
+        budget = self._tty_budget()
+        variants = [
+            [f'{self.count} it', f'({rate:.2f} it/s {elapsed_str})'],
+            [f'{self.count} it', elapsed_str],
+            [f'{self.count} it'],
+        ]
+
+        if budget is None:
+            return f'{self.desc} {variants[0][0]} {variants[0][1]}'
+
+        for tail_parts in variants:
+            line = self._fit_render_line(
+                desc=self.desc,
+                tail_parts=tail_parts,
+                budget=budget,
+            )
+            if line is not None:
+                return line
+
+        return self._clip_text(f'{self.desc} {self.count} it', budget)
+
     def _write_line(self, text: str) -> None:
         if self._is_tty:
             # \r = return, \x1b[2K = clear whole line (ANSI)
@@ -362,18 +525,18 @@ class Progress[T]:
                 if self.total == 0
                 else min(self.count / self.total, 1.0)
             )
-            filled = int(self.width * frac)
-            bar = f'[{"#" * filled}{"." * (self.width - filled)}]'
             percent = f'{frac * 100:6.2f}%'
-            line = (
-                f'{self._prefix}{bar} {percent} '
-                f'({self.count}/{self.total}) {rate:.2f} it/s '
-                f'{elapsed_str}{eta_str}'
+            line = self._build_known_total_line(
+                frac=frac,
+                percent=percent,
+                rate=rate,
+                elapsed_str=elapsed_str,
+                eta_str=eta_str,
             )
         else:
-            line = (
-                f'{self._prefix}{self.count} it '
-                f'({rate:.2f} it/s {elapsed_str})'
+            line = self._build_unknown_total_line(
+                rate=rate,
+                elapsed_str=elapsed_str,
             )
 
         self._write_line(line)
