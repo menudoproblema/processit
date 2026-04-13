@@ -7,6 +7,8 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-13
+
 ### Added
 
 - Added a GitHub Actions CI workflow to run Ruff, the progress test suite,
